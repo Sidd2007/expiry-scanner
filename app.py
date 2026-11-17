@@ -14,8 +14,8 @@ st.write("Upload a product photo to automatically check its health status.")
 
 # ----------------- EMAIL NOTIFICATION MODULE -----------------
 def send_expiry_email(user_email, food_status, expired_date):
-    sender_email = "expiryalertproject@gmail.com" 
-    sender_password = "abcd efgh ijkl mnop" 
+    sender_email = "saisiddhi.wabale@gmail.com" 
+    sender_password = "bmaz wzqt fbep pykw" 
     
     subject = f"⚠️ ALERT: Food Product Status - {food_status}!"
     body = (f"Hello,\n\n"
