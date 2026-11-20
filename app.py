@@ -34,7 +34,7 @@ def send_expiry_email(user_email, food_status, expired_date):
     msg.attach(MIMEText(body, 'plain'))
     
     try:
-        server = smtplib.SMTP('://gmail.com', 587)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, user_email, msg.as_string())
