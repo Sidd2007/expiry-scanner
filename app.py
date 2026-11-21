@@ -10,7 +10,12 @@ from email.mime.multipart import MIMEMultipart
 
 st.set_page_config(page_title="Auto Expiry Scanner", layout="centered")
 st.title("🛡️ Automated Expiry Date Recognition System")
-st.write("Upload a product photo to automatically check its health status.")
+st.write("Upload a full product photo — no cropping needed!")
+
+# EasyOCR मॉडेल कॅश करणे (जेणेकरून Streamlit सर्व्हर क्रॅश होणार नाही)
+@st.cache_resource
+def load_reader():
+    return easyocr.Reader(['en'], gpu=False)
 
 # ----------------- EMAIL NOTIFICATION MODULE -----------------
 def send_expiry_email(user_email, food_status, expired_date):
@@ -34,7 +39,7 @@ def send_expiry_email(user_email, food_status, expired_date):
     msg.attach(MIMEText(body, 'plain'))
     
     try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server = smtplib.SMTP('://gmail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, user_email, msg.as_string())
@@ -44,72 +49,100 @@ def send_expiry_email(user_email, food_status, expired_date):
         return False
 # -------------------------------------------------------------
 
+# अंक (02, 03) आणि महिन्यांची नावे (FEB, FEBRUARY, MARCH) दोन्ही ओळखणारे फंक्शन
+def parse_any_date(date_str):
+    date_str = date_str.upper().strip()
+    # तारखेतील -, /, . काढून स्पेस टाकणे
+    date_str = re.sub(r'[-/\.]', ' ', date_str)
+    # जर '21FEB2027' असं सलग चिकटून आलं असेल तर अंक आणि अक्षरांमध्ये स्पेस टाकणे
+    date_str = re.sub(r'(\d+)([A-Z]+)', r'\1 \2', date_str)
+    date_str = re.sub(r'([A-Z]+)(\d+)', r'\1 \2', date_str)
+    date_str = re.sub(r'\s+', ' ', date_str).strip()
+    
+    formats = [
+        "%d %m %Y", "%d %m %y", "%m %Y", "%m %y",
+        "%d %B %Y", "%d %b %Y", "%d %B %y", "%d %b %y",
+        "%B %Y", "%b %Y", "%B %y", "%b %y"
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+# पूर्ण फोटो न क्रॉप करता त्यातून एक्सपायरी तारीख शोधणारे फंक्शन
+def process_packet_data(image_bytes):
+    reader = load_reader()
+    file_bytes = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    
+    # १. पूर्ण फोटोतील लहान अक्षरे स्पष्ट वाचण्यासाठी Image Upscaling
+    height, width = img.shape[:2]
+    if width < 1200:
+        scale = 1200 / width
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    
+    # २. अक्षरांचा कॉन्ट्रास्ट वाढवणे (CLAHE टेक्निक)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    enhanced_img = clahe.apply(gray)
+    
+    # ३. फोटोमधून मजकूर वाचणे
+    results = reader.readtext(enhanced_img)
+    full_text = " ".join([text for (_, text, _) in results]).upper()
+    
+    # ४. अंकांच्या तारखा (उदा. 21/02/2027, 03/26) आणि महिन्यांच्या नावांच्या तारखा (उदा. 21 FEBRUARY 2027, MAR 2027)
+    # टीप: यात '.' (डॉट) काढला आहे जेणेकरून 48.00 सारखी किंमत तारीख समजली जाणार नाही
+    month_names = r'(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
+    date_pattern = rf'\b(?:\d{{1,2}}[-/\s]*)?{month_names}[-/\s]*\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{2,4}}\b'
+    
+    # आधी 'USE BY', 'EXP', 'BEST BEFORE' कीवर्डच्या जवळची तारीख शोधणे
+    priority_match = re.search(rf'(?:USE\s*BY|EXP(?:IRY)?|BEST\s*BEFORE|BB)[\s:.-]*({date_pattern})', full_text)
+    if priority_match:
+        return priority_match.group(1)
+        
+    # कीवर्ड न सापडल्यास सापडलेल्या सर्व तारखांमधून शेवटची तारीख (जी सहसा Expiry असते) घेणे
+    all_matches = re.findall(date_pattern, full_text)
+    if all_matches:
+        return all_matches[-1]
+        
+    return None
+
 # USER INPUT INTERFACE
 user_email = st.text_input("📧 Enter your Email ID for Mobile Notification (Optional):", placeholder="example@gmail.com")
 uploaded_file = st.file_uploader("Upload Product Wrapper Photo:", type=["jpg", "jpeg", "png", "webp"])
 
-def process_packet_data(image_bytes):
-    reader = easyocr.Reader(['en'], gpu=False)
-    file_bytes = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    
-    results = reader.readtext(img)
-    
-    date_pattern = r'\b\d{2}[-/\.]\d{2}[-/\.]\d{2,4}\b|\b\d{2}[-/\.]\d{2,4}\b'
-    all_detected_dates = []
-    
-    for bbox, text, prob in results:
-        txt_clean = text.replace(" ", "")
-        matches = re.findall(date_pattern, txt_clean)
-        for m in matches:
-            if m not in all_detected_dates:
-                all_detected_dates.append(m)
-                
-    if len(all_detected_dates) >= 2:
-        return all_detected_dates[1]
-    elif len(all_detected_dates) == 1:
-        return all_detected_dates[0]
-        
-    return None
-
 if uploaded_file is not None:
-    st.image(uploaded_file, caption="Target Product Wrapper", use_container_width=True)
+    st.image(uploaded_file, caption="Uploaded Product Image", use_container_width=True)
     
-    with st.spinner("Processing OCR pipeline... Scanning packet data..."):
+    with st.spinner("Scanning full packet... Detecting expiry date..."):
         file_bytes_data = uploaded_file.getvalue()
         detected_date = process_packet_data(file_bytes_data)
         
     st.subheader("System Isolated Output Screen")
     
     if detected_date:
-        clean_date_str = re.sub(r'[-/\.]', '/', detected_date)
-        parts = clean_date_str.split('/')
+        exp_date = parse_any_date(detected_date)
+        food_status = ""
         
-        food_status = "" 
-        
-        try:
-            if len(parts) == 2:
-                exp_date = datetime.strptime(clean_date_str, "%m/%Y") if len(parts[1]) == 4 else datetime.strptime(clean_date_str, "%m/%y")
-            else:
-                exp_date = datetime.strptime(clean_date_str, "%d/%m/%Y") if len(parts[2]) == 4 else datetime.strptime(clean_date_str, "%d/%m/%y")
-            
+        if exp_date:
             current_date = datetime.now()
             soon_days = current_date + timedelta(days=30)
             
             if current_date > exp_date:
                 st.error("Calculated Health Evaluation: **EXPIRED ❌**")
                 food_status = "EXPIRED"
-            elif current_date <= exp_date and exp_date <= soon_days:
+            elif current_date <= exp_date <= soon_days:
                 st.warning("Calculated Health Evaluation: **EXPIRING SOON ⚠️**")
                 food_status = "EXPIRING SOON"
             else:
                 st.success("Calculated Health Evaluation: **NOT EXPIRED ✅**")
                 food_status = "NOT EXPIRED"
-        except:
-            st.error("Calculated Health Evaluation: **EXPIRED ❌**")
-            food_status = "EXPIRED"
-            
-        st.info(f"Scanned Expiry Date: **{detected_date}**")
+                
+            st.info(f"Scanned Expiry Date: **{detected_date}**")
+        else:
+            st.warning(f"Detected Text: **{detected_date}** (Could not verify exact date format)")
         
         # AUTOMATED EMAIL ALERT TRIGGER
         if user_email and (food_status == "EXPIRED" or food_status == "EXPIRING SOON"):
@@ -121,5 +154,5 @@ if uploaded_file is not None:
                     st.caption("ℹ️ Backend Alert System Simulated: Email configuration required for production.")
         
     else:
-        st.warning("Calculated Health Evaluation: **Status evaluation limits reached.**")
-        st.info("System recommendation: Try taking a closer, clear shot of the date section.")
+        st.warning("Calculated Health Evaluation: **Could not detect a clear expiry date.**")
+        st.info("System recommendation: Ensure the 'Use By' or 'Expiry Date' area on the packet is clearly visible and well-lit.")
