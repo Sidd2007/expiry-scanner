@@ -34,7 +34,7 @@ def send_expiry_email(user_email, food_status, expired_date):
     msg.attach(MIMEText(body, 'plain'))
     
     try:
-        server = smtplib.SMTP('://gmail.com', 587)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, user_email, msg.as_string())
@@ -55,7 +55,6 @@ def process_packet_data(image_bytes):
     
     results = reader.readtext(img)
     
-    # १. तुझा कालचा मूळ पॅटर्न (फक्त 48.00 सारखी किंमत टाळून)
     date_pattern = r'\b\d{2}[-/\.]\d{2}[-/\.]\d{2,4}\b|\b\d{2}[-/\.]\d{2,4}\b'
     all_detected_dates = []
     
@@ -63,9 +62,6 @@ def process_packet_data(image_bytes):
         txt_clean = text.replace(" ", "")
         matches = re.findall(date_pattern, txt_clean)
         for m in matches:
-            # 48.00 सारखी किंमत (जिचा पहिला आकडा 31 पेक्षा मोठा आहे) वगळणे
-            if "." in m and len(m.split(".")) == 2 and int(m.split(".")[0]) > 31:
-                continue
             if m not in all_detected_dates:
                 all_detected_dates.append(m)
                 
@@ -73,12 +69,6 @@ def process_packet_data(image_bytes):
         return all_detected_dates[1]
     elif len(all_detected_dates) == 1:
         return all_detected_dates[0]
-
-    # २. जर अंकांची तारीख नसेल तर महिन्याची नावे (उदा. 21 FEBRUARY 2027) शोधणे
-    full_text = " ".join([text for (_, text, _) in results]).upper()
-    month_match = re.search(r'\b\d{1,2}\s+(?:JAN|FEB|FEBRUARY|MAR|MARCH|APR|APRIL|MAY|JUN|JUNE|JUL|JULY|AUG|AUGUST|SEP|SEPTEMBER|OCT|OCTOBER|NOV|NOVEMBER|DEC|DECEMBER)\s+\d{2,4}\b', full_text)
-    if month_match:
-        return month_match.group(0)
         
     return None
 
@@ -92,19 +82,13 @@ if uploaded_file is not None:
     st.subheader("System Isolated Output Screen")
     
     if detected_date:
-        clean_date_str = re.sub(r'[-/\.]', '/', detected_date).strip()
+        clean_date_str = re.sub(r'[-/\.]', '/', detected_date)
         parts = clean_date_str.split('/')
         
         food_status = "" 
         
         try:
-            # जर महिन्याचं नाव असेल (उदा. 21 FEBRUARY 2027)
-            if any(c.isalpha() for c in clean_date_str):
-                try:
-                    exp_date = datetime.strptime(clean_date_str, "%d %B %Y")
-                except:
-                    exp_date = datetime.strptime(clean_date_str, "%d %b %Y")
-            elif len(parts) == 2:
+            if len(parts) == 2:
                 exp_date = datetime.strptime(clean_date_str, "%m/%Y") if len(parts[1]) == 4 else datetime.strptime(clean_date_str, "%m/%y")
             else:
                 exp_date = datetime.strptime(clean_date_str, "%d/%m/%Y") if len(parts[2]) == 4 else datetime.strptime(clean_date_str, "%d/%m/%y")
@@ -138,4 +122,4 @@ if uploaded_file is not None:
         
     else:
         st.warning("Calculated Health Evaluation: **Status evaluation limits reached.**")
-        st.info("System recommendation: Try taking a closer, well-lit photo focusing directly on the expiry date.")
+        st.info("System recommendation: Try taking a closer, clear shot of the date section.")
