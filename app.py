@@ -12,7 +12,6 @@ st.set_page_config(page_title="Auto Expiry Scanner", layout="centered")
 st.title("🛡️ Automated Expiry Date Recognition System")
 st.write("Upload a full product photo — works with cropped, uncropped, rotated, and all date formats!")
 
-# EasyOCR मॉडेल कॅश करणे (जेणेकरून Streamlit सर्व्हर क्रॅश होणार नाही)
 @st.cache_resource
 def load_reader():
     return easyocr.Reader(['en'], gpu=False)
@@ -49,26 +48,23 @@ def send_expiry_email(user_email, food_status, expired_date):
         return False
 # -------------------------------------------------------------
 
-# अंक (02, 03), महिन्यांची नावे (FEB, FEBRUARY, MARCH) आणि सलग तारीख (120924) ओळखणारे फंक्शन
 def parse_any_date(date_str):
     date_str = date_str.upper().strip()
-    
-    # जर स्लॅश नसलेली सलग ६ किंवा ८ अंकी तारीख असेल (उदा. 120924 किंवा 12092024)
-    if date_str.isdigit():
-        if len(date_str) == 6:
+    # सर्व चिन्हे आणि स्पेस काढून फक्त अंक उरल्यास (उदा. 120924 किंवा 12092024)
+    digits_only = re.sub(r'[^0-9]', '', date_str)
+    if digits_only == date_str:
+        if len(digits_only) == 6:
             try:
-                return datetime.strptime(date_str, "%d%m%y")
+                return datetime.strptime(digits_only, "%d%m%y")
             except ValueError:
                 pass
-        elif len(date_str) == 8:
+        elif len(digits_only) == 8:
             try:
-                return datetime.strptime(date_str, "%d%m%Y")
+                return datetime.strptime(digits_only, "%d%m%Y")
             except ValueError:
                 pass
 
-    # तारखेतील -, /, . काढून स्पेस टाकणे
     date_str = re.sub(r'[-/\.]', ' ', date_str)
-    # जर '21FEB2027' असं सलग चिकटून आलं असेल तर अंक आणि अक्षरांमध्ये स्पेस टाकणे
     date_str = re.sub(r'(\d+)([A-Z]+)', r'\1 \2', date_str)
     date_str = re.sub(r'([A-Z]+)(\d+)', r'\1 \2', date_str)
     date_str = re.sub(r'\s+', ' ', date_str).strip()
@@ -85,49 +81,49 @@ def parse_any_date(date_str):
             continue
     return None
 
-# सरळ, पूर्ण आणि उभा (Rotated) सर्व प्रकारचे फोटो वाचणारे फंक्शन
+def extract_date_from_text(full_text):
+    month_names = r'(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
+    # महिन्याचे नाव, स्लॅश/डॅश तारीख, किंवा सलग ६-८ अंकी तारीख (उदा. 120924)
+    date_pattern = rf'\b(?:\d{{1,2}}[-/\s]*)?{month_names}[-/\s]*\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{2,4}}\b|\b(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])(?:2\d|202\d)\b'
+    
+    priority_match = re.search(rf'(?:USE\s*BY|EXP(?:IRY)?|BEST\s*BEFORE|BB)[\s:.-]*({date_pattern})', full_text)
+    if priority_match:
+        return priority_match.group(1)
+        
+    all_matches = re.findall(date_pattern, full_text)
+    if all_matches:
+        return all_matches[-1]
+    return None
+
 def process_packet_data(image_bytes):
     reader = load_reader()
     file_bytes = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     
-    # १. पूर्ण फोटोतील लहान अक्षरे स्पष्ट वाचण्यासाठी Image Upscaling
     height, width = img.shape[:2]
     if width < 1200:
         scale = 1200 / width
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     
-    # २. अक्षरांचा कॉन्ट्रास्ट वाढवणे (CLAHE टेक्निक)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    enhanced_img = clahe.apply(gray)
-    
-    # ३. सर्व प्रकारच्या तारखांचा पॅटर्न (महिन्याचे नाव, स्लॅश असलेली तारीख आणि सलग ६-८ अंकी तारीख)
-    month_names = r'(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
-    date_pattern = rf'\b(?:\d{{1,2}}[-/\s]*)?{month_names}[-/\s]*\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{2,4}}\b|\b(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])\d{{2,4}}\b'
-
-    # ४. फोटो सरळ तसेच ९० आणि २७० डिग्री फिरवून चेक करणे (उभ्या अक्षरांसाठी)
+    # १. मूळ कलर इमेजवर चेक करणे (पांढऱ्या लेबलवर चमक असल्यास कलर इमेज जास्त चांगली चालते)
+    # २. आणि उभ्या (Rotated) फोटोसाठी ९० व २७० डिग्री फिरवून चेक करणे
     rotations = [
-        enhanced_img,
-        cv2.rotate(enhanced_img, cv2.ROTATE_90_CLOCKWISE),
-        cv2.rotate(enhanced_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        img,
+        cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE),
+        cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
     ]
     
+    detected_texts_log = []
     for current_img in rotations:
         results = reader.readtext(current_img)
         full_text = " ".join([text for (_, text, _) in results]).upper()
+        detected_texts_log.append(full_text)
         
-        # आधी 'USE BY', 'EXP', 'BEST BEFORE' कीवर्डच्या जवळची तारीख शोधणे
-        priority_match = re.search(rf'(?:USE\s*BY|EXP(?:IRY)?|BEST\s*BEFORE|BB)[\s:.-]*({date_pattern})', full_text)
-        if priority_match:
-            return priority_match.group(1)
+        found_date = extract_date_from_text(full_text)
+        if found_date:
+            return found_date, full_text
             
-        # कीवर्ड न सापडल्यास सापडलेल्या सर्व तारखांमधून शेवटची तारीख (जी सहसा Expiry असते) घेणे
-        all_matches = re.findall(date_pattern, full_text)
-        if all_matches:
-            return all_matches[-1]
-            
-    return None
+    return None, detected_texts_log[0] if detected_texts_log else ""
 
 # USER INPUT INTERFACE
 user_email = st.text_input("📧 Enter your Email ID for Mobile Notification (Optional):", placeholder="example@gmail.com")
@@ -136,9 +132,9 @@ uploaded_file = st.file_uploader("Upload Product Wrapper Photo:", type=["jpg", "
 if uploaded_file is not None:
     st.image(uploaded_file, caption="Uploaded Product Image", use_container_width=True)
     
-    with st.spinner("Scanning full packet... Detecting expiry date..."):
+    with st.spinner("Scanning full packet (checking all angles & formats)..."):
         file_bytes_data = uploaded_file.getvalue()
-        detected_date = process_packet_data(file_bytes_data)
+        detected_date, raw_ocr = process_packet_data(file_bytes_data)
         
     st.subheader("System Isolated Output Screen")
     
@@ -176,3 +172,5 @@ if uploaded_file is not None:
     else:
         st.warning("Calculated Health Evaluation: **Could not detect a clear expiry date.**")
         st.info("System recommendation: Ensure the 'Use By' or 'Expiry Date' area on the packet is clearly visible and well-lit.")
+        with st.expander("🔍 View Raw OCR Scanned Text (Debug)"):
+            st.write(raw_ocr if raw_ocr else "No readable text detected due to glare/blur.")
