@@ -10,7 +10,7 @@ from email.mime.multipart import MIMEMultipart
 
 st.set_page_config(page_title="Auto Expiry Scanner", layout="centered")
 st.title("🛡️ Automated Expiry Date Recognition System")
-st.write("Upload a full product photo — no cropping needed!")
+st.write("Upload a full product photo — works with cropped, uncropped, rotated, and all date formats!")
 
 # EasyOCR मॉडेल कॅश करणे (जेणेकरून Streamlit सर्व्हर क्रॅश होणार नाही)
 @st.cache_resource
@@ -49,9 +49,23 @@ def send_expiry_email(user_email, food_status, expired_date):
         return False
 # -------------------------------------------------------------
 
-# अंक (02, 03) आणि महिन्यांची नावे (FEB, FEBRUARY, MARCH) दोन्ही ओळखणारे फंक्शन
+# अंक (02, 03), महिन्यांची नावे (FEB, FEBRUARY, MARCH) आणि सलग तारीख (120924) ओळखणारे फंक्शन
 def parse_any_date(date_str):
     date_str = date_str.upper().strip()
+    
+    # जर स्लॅश नसलेली सलग ६ किंवा ८ अंकी तारीख असेल (उदा. 120924 किंवा 12092024)
+    if date_str.isdigit():
+        if len(date_str) == 6:
+            try:
+                return datetime.strptime(date_str, "%d%m%y")
+            except ValueError:
+                pass
+        elif len(date_str) == 8:
+            try:
+                return datetime.strptime(date_str, "%d%m%Y")
+            except ValueError:
+                pass
+
     # तारखेतील -, /, . काढून स्पेस टाकणे
     date_str = re.sub(r'[-/\.]', ' ', date_str)
     # जर '21FEB2027' असं सलग चिकटून आलं असेल तर अंक आणि अक्षरांमध्ये स्पेस टाकणे
@@ -71,7 +85,7 @@ def parse_any_date(date_str):
             continue
     return None
 
-# पूर्ण फोटो न क्रॉप करता त्यातून एक्सपायरी तारीख शोधणारे फंक्शन
+# सरळ, पूर्ण आणि उभा (Rotated) सर्व प्रकारचे फोटो वाचणारे फंक्शन
 def process_packet_data(image_bytes):
     reader = load_reader()
     file_bytes = np.frombuffer(image_bytes, np.uint8)
@@ -88,25 +102,31 @@ def process_packet_data(image_bytes):
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     enhanced_img = clahe.apply(gray)
     
-    # ३. फोटोमधून मजकूर वाचणे
-    results = reader.readtext(enhanced_img)
-    full_text = " ".join([text for (_, text, _) in results]).upper()
-    
-    # ४. अंकांच्या तारखा (उदा. 21/02/2027, 03/26) आणि महिन्यांच्या नावांच्या तारखा (उदा. 21 FEBRUARY 2027, MAR 2027)
-    # टीप: यात '.' (डॉट) काढला आहे जेणेकरून 48.00 सारखी किंमत तारीख समजली जाणार नाही
+    # ३. सर्व प्रकारच्या तारखांचा पॅटर्न (महिन्याचे नाव, स्लॅश असलेली तारीख आणि सलग ६-८ अंकी तारीख)
     month_names = r'(?:JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)'
-    date_pattern = rf'\b(?:\d{{1,2}}[-/\s]*)?{month_names}[-/\s]*\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{2,4}}\b'
+    date_pattern = rf'\b(?:\d{{1,2}}[-/\s]*)?{month_names}[-/\s]*\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}}\b|\b\d{{1,2}}[-/]\d{{2,4}}\b|\b(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])\d{{2,4}}\b'
+
+    # ४. फोटो सरळ तसेच ९० आणि २७० डिग्री फिरवून चेक करणे (उभ्या अक्षरांसाठी)
+    rotations = [
+        enhanced_img,
+        cv2.rotate(enhanced_img, cv2.ROTATE_90_CLOCKWISE),
+        cv2.rotate(enhanced_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    ]
     
-    # आधी 'USE BY', 'EXP', 'BEST BEFORE' कीवर्डच्या जवळची तारीख शोधणे
-    priority_match = re.search(rf'(?:USE\s*BY|EXP(?:IRY)?|BEST\s*BEFORE|BB)[\s:.-]*({date_pattern})', full_text)
-    if priority_match:
-        return priority_match.group(1)
+    for current_img in rotations:
+        results = reader.readtext(current_img)
+        full_text = " ".join([text for (_, text, _) in results]).upper()
         
-    # कीवर्ड न सापडल्यास सापडलेल्या सर्व तारखांमधून शेवटची तारीख (जी सहसा Expiry असते) घेणे
-    all_matches = re.findall(date_pattern, full_text)
-    if all_matches:
-        return all_matches[-1]
-        
+        # आधी 'USE BY', 'EXP', 'BEST BEFORE' कीवर्डच्या जवळची तारीख शोधणे
+        priority_match = re.search(rf'(?:USE\s*BY|EXP(?:IRY)?|BEST\s*BEFORE|BB)[\s:.-]*({date_pattern})', full_text)
+        if priority_match:
+            return priority_match.group(1)
+            
+        # कीवर्ड न सापडल्यास सापडलेल्या सर्व तारखांमधून शेवटची तारीख (जी सहसा Expiry असते) घेणे
+        all_matches = re.findall(date_pattern, full_text)
+        if all_matches:
+            return all_matches[-1]
+            
     return None
 
 # USER INPUT INTERFACE
